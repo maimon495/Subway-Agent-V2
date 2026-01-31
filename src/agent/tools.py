@@ -53,11 +53,35 @@ def get_next_trains(
     if isinstance(limit, str):
         limit = int(limit)
 
-    logger.debug(f"[get_next_trains] Called with: station={station!r}, line={line!r}, direction={direction!r}, limit={limit}")
+    # Parse slash-separated lines (e.g., "2/3" -> ["2", "3"])
+    lines_to_query = None
+    if line:
+        if "/" in line:
+            lines_to_query = [l.strip().upper() for l in line.split("/")]
+        else:
+            lines_to_query = [line.strip().upper()]
+
+    logger.debug(f"[get_next_trains] Called with: station={station!r}, line={line!r}, parsed_lines={lines_to_query!r}, direction={direction!r}, limit={limit}")
     try:
-        query = ArrivalQuery(station=station, line=line, direction=direction, limit=limit)
+        # Query for first line to get station info, then filter results
+        first_line = lines_to_query[0] if lines_to_query else None
+        query = ArrivalQuery(station=station, line=first_line, direction=direction, limit=limit * 2 if lines_to_query and len(lines_to_query) > 1 else limit)
         logger.debug(f"[get_next_trains] Created query: {query}")
         result = _run_async(get_arrivals(query))
+
+        # If multiple lines requested, also query for other lines and merge
+        if lines_to_query and len(lines_to_query) > 1:
+            all_arrivals = list(result.arrivals)
+            for extra_line in lines_to_query[1:]:
+                try:
+                    extra_query = ArrivalQuery(station=station, line=extra_line, direction=direction, limit=limit)
+                    extra_result = _run_async(get_arrivals(extra_query))
+                    all_arrivals.extend(extra_result.arrivals)
+                except Exception:
+                    pass  # Line might not serve this station
+            # Sort by arrival time and limit
+            all_arrivals.sort(key=lambda a: a.arrival_time)
+            result.arrivals = all_arrivals[:limit]
         logger.debug(f"[get_next_trains] Got {len(result.arrivals)} arrivals for station {result.station.name}")
 
         if not result.arrivals:
@@ -72,7 +96,7 @@ def get_next_trains(
             }
 
         # Get service alerts for lines at this station
-        lines_to_check = [line] if line else result.station.lines
+        lines_to_check = lines_to_query if lines_to_query else result.station.lines
         service_alerts = []
         try:
             alerts = _run_async(get_alerts_for_lines(lines_to_check))
