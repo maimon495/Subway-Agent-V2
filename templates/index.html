@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MTAGPT - NYC Subway Assistant</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; }
+        .header { background: #0039A6; color: white; padding: 20px; text-align: center; }
+        .header h1 { font-size: 28px; margin-bottom: 5px; }
+        .header p { opacity: 0.9; }
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        .welcome { background: white; border-radius: 12px; padding: 30px; margin-bottom: 20px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .welcome h2 { color: #0039A6; margin-bottom: 10px; }
+        .suggestions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 20px; }
+        .suggestion { background: white; border: 2px solid #0039A6; color: #0039A6; padding: 10px 20px; border-radius: 20px; cursor: pointer; transition: all 0.2s; }
+        .suggestion:hover { background: #0039A6; color: white; }
+        .chat-container { background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow: hidden; }
+        .messages { height: 400px; overflow-y: auto; padding: 20px; }
+        .message { margin-bottom: 15px; }
+        .message.user { text-align: right; }
+        .message .bubble { display: inline-block; padding: 12px 18px; border-radius: 18px; max-width: 80%; }
+        .message.user .bubble { background: #0039A6; color: white; }
+        .message.assistant .bubble { background: #e9e9e9; color: #333; }
+        .input-area { display: flex; border-top: 1px solid #ddd; }
+        .input-area input { flex: 1; padding: 18px; border: none; font-size: 16px; outline: none; }
+        .input-area button { padding: 18px 30px; background: #0039A6; color: white; border: none; cursor: pointer; font-size: 16px; }
+        .input-area button:hover { background: #002d7a; }
+        .typing { color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MTAGPT</h1>
+        <p>NYC Subway Assistant</p>
+    </div>
+    <div class="container">
+        <div class="welcome">
+            <h2>Welcome!</h2>
+            <p>Ask me about subway routes, train arrivals, or station info.</p>
+            <div class="suggestions">
+                <button class="suggestion" onclick="sendMessage('How do I get to Times Square?')">How do I get to Times Square?</button>
+                <button class="suggestion" onclick="sendMessage('Next A train at Penn Station?')">Next A train at Penn Station?</button>
+                <button class="suggestion" onclick="sendMessage('Is the L train running?')">Is the L train running?</button>
+            </div>
+        </div>
+        <div class="chat-container">
+            <div class="messages" id="messages"></div>
+            <div class="input-area">
+                <input type="text" id="input" placeholder="Ask about subway routes..." onkeypress="if(event.key==='Enter')sendMessage()">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        const apiKey = "{{ key }}";
+        const messagesDiv = document.getElementById('messages');
+        const input = document.getElementById('input');
+
+        async function sendMessage(text) {
+            const message = text || input.value.trim();
+            if (!message) return;
+            input.value = '';
+
+            addMessage(message, 'user');
+            const typingId = addMessage('Thinking...', 'assistant', true);
+
+            try {
+                const res = await fetch(`/chat?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                const data = await res.json();
+                removeMessage(typingId);
+                addMessage(data.response || data.detail, 'assistant');
+            } catch (e) {
+                removeMessage(typingId);
+                addMessage('Error: ' + e.message, 'assistant');
+            }
+        }
+
+        function addMessage(text, type, isTyping = false) {
+            const id = 'msg-' + Date.now();
+            const div = document.createElement('div');
+            div.id = id;
+            div.className = 'message ' + type;
+            div.innerHTML = '<div class="bubble' + (isTyping ? ' typing' : '') + '">' + text + '</div>';
+            messagesDiv.appendChild(div);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return id;
+        }
+
+        function removeMessage(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+    </script>
+</body>
+</html>
