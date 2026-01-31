@@ -55,13 +55,16 @@ class TransferOption:
     transfer_station: Station
     local_line: str
     express_line: str
-    local_arrival: datetime
-    express_arrival: datetime
+    local_arrival: datetime  # When local train arrives at transfer station
+    express_arrival: datetime  # When express train arrives at transfer station
     wait_time_minutes: float
     time_savings_minutes: int
     stops_skipped: int
     recommendation: Literal["transfer", "stay"]
     reason: str
+    # Arrival times at final destination
+    local_dest_arrival: Optional[datetime] = None  # If you stay on local
+    express_dest_arrival: Optional[datetime] = None  # If you transfer to express
 
 
 # GTFS-RT feed configuration

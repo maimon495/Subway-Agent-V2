@@ -207,3 +207,38 @@ async def get_arrivals_at_stop_multi_line(
 def clear_cache() -> None:
     """Clear the feed cache."""
     _feed_cache.clear()
+
+
+async def get_trip_stop_times(line: str, trip_id: str) -> dict[str, datetime]:
+    """Get all stop times for a specific trip.
+
+    Returns a dict mapping stop_id (without direction suffix) to arrival time.
+    This allows tracking a single train through its entire route.
+    """
+    feed_url = get_feed_url_for_line(line)
+    feed = await fetch_feed(feed_url)
+
+    stop_times: dict[str, datetime] = {}
+    for arrival in feed.arrivals:
+        if arrival.trip_id == trip_id:
+            base_stop_id = arrival.stop_id.rstrip("NS")
+            stop_times[base_stop_id] = arrival.arrival_time
+
+    logger.debug(f"[get_trip_stop_times] Found {len(stop_times)} stops for trip {trip_id}")
+    return stop_times
+
+
+async def get_arrival_time_at_stop_for_trip(
+    line: str,
+    trip_id: str,
+    stop_id: str
+) -> Optional[datetime]:
+    """Get the arrival time of a specific trip at a specific stop.
+
+    This is used to project when a train you board at station A will arrive at station B.
+    """
+    stop_times = await get_trip_stop_times(line, trip_id)
+    base_stop_id = stop_id.rstrip("NS")
+    arrival = stop_times.get(base_stop_id)
+    logger.debug(f"[get_arrival_time_at_stop_for_trip] Trip {trip_id} at stop {base_stop_id}: {arrival}")
+    return arrival

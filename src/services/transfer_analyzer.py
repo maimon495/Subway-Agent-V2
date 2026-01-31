@@ -1,15 +1,20 @@
 """Transfer analysis for local-to-express optimization."""
+import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Optional
 
-from ..data.types import Station, TransferOption, TransferPoint
+from ..data.types import Station, TransferOption, TransferPoint, TrainArrival
 from ..data.stations import get_station_by_id, get_stations_for_line
 from ..data.transfer_points import get_transfer_points_between
 from ..data.lines import get_express_alternative
+from ..gtfs.client import get_arrival_time_at_stop_for_trip
 from ..utils.time import get_minutes_diff
 from .arrival_service import get_arrivals_multi_line
 
-TRANSFER_WINDOW_MS = 2 * 60 * 1000  # 2 minutes
+logger = logging.getLogger(__name__)
+
+MAX_EXPRESS_WAIT_MINUTES = 5  # Max time to wait for express after local arrives
 MIN_STOPS_FOR_TRANSFER = 4
 
 
@@ -96,11 +101,26 @@ async def analyze_transfers(
     destination: Station,
     local_line: str,
     direction: Literal["N", "S"],
+    boarding_train: Optional[TrainArrival] = None,
 ) -> TransferAnalysis:
-    """Analyze potential local-to-express transfers for a route."""
+    """Analyze potential local-to-express transfers for a route.
+
+    Args:
+        origin: Starting station
+        destination: Ending station
+        local_line: The local line to take
+        direction: Direction of travel (N/S)
+        boarding_train: The specific train the user will board at origin.
+                       If provided, uses GTFS trip data to get exact arrival times.
+    """
+    logger.debug(f"[analyze_transfers] Starting analysis: {origin.name} -> {destination.name}, line={local_line}, dir={direction}")
+    if boarding_train:
+        logger.debug(f"[analyze_transfers] Boarding train: trip_id={boarding_train.trip_id}, departs origin at {boarding_train.arrival_time}")
+
     express_lines = get_express_alternative(local_line)
 
     if not express_lines:
+        logger.debug(f"[analyze_transfers] No express alternative for {local_line}")
         return TransferAnalysis(
             origin=origin,
             destination=destination,
@@ -113,6 +133,7 @@ async def analyze_transfers(
 
     # Get transfer points
     transfer_points = get_transfer_points_between(local_line, express_lines[0])
+    logger.debug(f"[analyze_transfers] Found {len(transfer_points)} transfer points between {local_line} and {express_lines[0]}")
 
     # Filter to valid transfer points
     valid_transfer_points = []
@@ -122,13 +143,17 @@ async def analyze_transfers(
             continue
 
         if not _is_station_between(origin, transfer_station, destination, local_line, direction):
+            logger.debug(f"[analyze_transfers] {transfer_station.name} not between origin and destination, skipping")
             continue
 
         stops_remaining = _count_stops(transfer_station, destination, local_line, direction)
         if stops_remaining <= MIN_STOPS_FOR_TRANSFER - 1:
+            logger.debug(f"[analyze_transfers] {transfer_station.name} only {stops_remaining} stops from destination, skipping")
             continue
 
         valid_transfer_points.append(tp)
+
+    logger.debug(f"[analyze_transfers] {len(valid_transfer_points)} valid transfer points")
 
     if not valid_transfer_points:
         return TransferAnalysis(
@@ -150,39 +175,105 @@ async def analyze_transfers(
             continue
 
         express_line = tp.lines["express"][0]
+        transfer_stop_id = transfer_station.gtfs_stop_ids.get("N", "").rstrip("NS")
 
-        # Get real-time arrivals
-        local_arrivals = await get_arrivals_multi_line(transfer_station, [local_line], direction)
+        # Get when the user's train arrives at the transfer station
+        local_arrival_at_transfer = None
+
+        if boarding_train and boarding_train.trip_id:
+            # Try to use actual GTFS trip data to get exact arrival time at transfer station
+            local_arrival_at_transfer = await get_arrival_time_at_stop_for_trip(
+                local_line, boarding_train.trip_id, transfer_stop_id
+            )
+
+        if not local_arrival_at_transfer and boarding_train:
+            # Fallback: estimate based on stops (2 min/stop)
+            # This happens at terminal stations where the arriving trip_id differs from departing trip_id
+            stops_to_transfer = _count_stops(origin, transfer_station, local_line, direction)
+            from datetime import timedelta
+            estimated_travel_time = timedelta(minutes=stops_to_transfer * 2)
+            local_arrival_at_transfer = boarding_train.arrival_time + estimated_travel_time
+            logger.debug(f"[analyze_transfers] Using estimated arrival at {transfer_station.name}: {local_arrival_at_transfer} ({stops_to_transfer} stops * 2 min)")
+        elif local_arrival_at_transfer:
+            logger.debug(f"[analyze_transfers] Train {boarding_train.trip_id} arrives at {transfer_station.name} at {local_arrival_at_transfer}")
+
+        if not local_arrival_at_transfer:
+            logger.warning(f"[analyze_transfers] No boarding train provided, cannot calculate transfer timing")
+            continue
+
+        # Get express arrivals at transfer station AFTER local arrives
         express_arrivals = await get_arrivals_multi_line(transfer_station, [express_line], direction)
 
-        # Find matching pairs within transfer window
-        for local in local_arrivals[:3]:
-            for exp in express_arrivals:
-                diff_ms = (exp.arrival_time - local.arrival_time).total_seconds() * 1000
-                if 0 < diff_ms <= TRANSFER_WINDOW_MS:
-                    wait_time_minutes = get_minutes_diff(exp.arrival_time, local.arrival_time)
+        # Find the next express that arrives after the local
+        next_express = None
+        for exp in express_arrivals:
+            time_after_local = (exp.arrival_time - local_arrival_at_transfer).total_seconds() / 60
+            if time_after_local >= 0:
+                next_express = exp
+                logger.debug(f"[analyze_transfers] Found express {exp.line} arriving {time_after_local:.1f} min after local at {transfer_station.name}")
+                break
 
-                    stops_skipped = _count_stops_skipped(
-                        transfer_station, destination, local_line, express_line, direction
-                    )
+        if not next_express:
+            logger.debug(f"[analyze_transfers] No express found after local at {transfer_station.name}")
+            continue
 
-                    time_saved_from_express = stops_skipped * 2
-                    transfer_penalty = (tp.transfer_time_seconds / 60) + wait_time_minutes
-                    net_savings = time_saved_from_express - transfer_penalty
+        wait_time_minutes = (next_express.arrival_time - local_arrival_at_transfer).total_seconds() / 60
 
-                    possible_transfers.append(TransferOption(
-                        transfer_station=transfer_station,
-                        local_line=local_line,
-                        express_line=express_line,
-                        local_arrival=local.arrival_time,
-                        express_arrival=exp.arrival_time,
-                        wait_time_minutes=wait_time_minutes,
-                        time_savings_minutes=round(net_savings),
-                        stops_skipped=stops_skipped,
-                        recommendation="transfer" if net_savings > 0 else "stay",
-                        reason=_build_reason(net_savings, wait_time_minutes, stops_skipped, tp),
-                    ))
-                    break
+        # Calculate arrival at destination for both scenarios
+        # Get destination stop ID
+        dest_stop_id = destination.gtfs_stop_ids.get("N", "").rstrip("NS")
+
+        # Scenario A: Stay on local - get arrival time at destination from same trip
+        local_arrival_at_dest = await get_arrival_time_at_stop_for_trip(
+            local_line, boarding_train.trip_id, dest_stop_id
+        )
+
+        # Scenario B: Transfer to express - get arrival time at destination from express trip
+        express_arrival_at_dest = None
+        if next_express.trip_id:
+            express_arrival_at_dest = await get_arrival_time_at_stop_for_trip(
+                express_line, next_express.trip_id, dest_stop_id
+            )
+
+        # Calculate actual time savings
+        if local_arrival_at_dest and express_arrival_at_dest:
+            # Add transfer walk time to express scenario
+            transfer_walk_minutes = tp.transfer_time_seconds / 60
+            effective_express_arrival = express_arrival_at_dest
+            # Note: transfer walk time is already accounted for in waiting for the express
+
+            time_savings = (local_arrival_at_dest - express_arrival_at_dest).total_seconds() / 60
+            logger.debug(f"[analyze_transfers] Stay on local: arrive {local_arrival_at_dest}")
+            logger.debug(f"[analyze_transfers] Transfer to express: arrive {express_arrival_at_dest}")
+            logger.debug(f"[analyze_transfers] Time savings: {time_savings:.1f} min")
+        else:
+            # Fallback to stop-based estimate
+            stops_skipped = _count_stops_skipped(
+                transfer_station, destination, local_line, express_line, direction
+            )
+            time_saved_from_express = stops_skipped * 2
+            transfer_penalty = (tp.transfer_time_seconds / 60) + wait_time_minutes
+            time_savings = time_saved_from_express - transfer_penalty
+            logger.debug(f"[analyze_transfers] Using estimated savings: {time_savings:.1f} min (skipping {stops_skipped} stops)")
+
+        stops_skipped = _count_stops_skipped(
+            transfer_station, destination, local_line, express_line, direction
+        )
+
+        possible_transfers.append(TransferOption(
+            transfer_station=transfer_station,
+            local_line=local_line,
+            express_line=express_line,
+            local_arrival=local_arrival_at_transfer,
+            express_arrival=next_express.arrival_time,
+            wait_time_minutes=round(wait_time_minutes, 1),
+            time_savings_minutes=round(time_savings),
+            stops_skipped=stops_skipped,
+            recommendation="transfer" if time_savings >= 2 else "stay",
+            reason=_build_reason(time_savings, wait_time_minutes, stops_skipped, tp),
+            local_dest_arrival=local_arrival_at_dest,
+            express_dest_arrival=express_arrival_at_dest,
+        ))
 
     # Sort by time savings
     possible_transfers.sort(key=lambda t: t.time_savings_minutes, reverse=True)

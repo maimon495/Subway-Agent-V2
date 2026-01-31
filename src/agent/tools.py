@@ -76,9 +76,28 @@ def get_next_trains(
         service_alerts = []
         try:
             alerts = _run_async(get_alerts_for_lines(lines_to_check))
+
+            # Get GTFS stop IDs for this station to filter elevator alerts
+            station_stop_ids = {s.rstrip("NS") for s in result.station.gtfs_stop_ids.values()}
+
+            filtered_alerts = []
+            for a in alerts:
+                # Check if this is an elevator/escalator outage
+                header_lower = a.header_text.lower()
+                is_elevator_alert = "elevator" in header_lower or "escalator" in header_lower
+
+                if is_elevator_alert:
+                    # Only include if it affects this station
+                    alert_stop_ids = {s.rstrip("NS") for s in a.affected_stops}
+                    if alert_stop_ids & station_stop_ids:
+                        filtered_alerts.append(a)
+                else:
+                    # Non-elevator alerts are always included
+                    filtered_alerts.append(a)
+
             service_alerts = [
                 {"lines": a.affected_lines, "header": a.header_text, "effect": a.effect}
-                for a in alerts[:3]
+                for a in filtered_alerts[:3]
             ]
         except Exception:
             pass
@@ -135,12 +154,53 @@ def get_route_recommendation(origin: str, destination: str) -> dict:
         try:
             alerts = _run_async(get_alerts_for_lines(result.direct_lines))
             if alerts:
-                service_alerts = [
-                    {"lines": a.affected_lines, "header": a.header_text, "effect": a.effect}
-                    for a in alerts[:3]
-                ]
+                # Get GTFS stop IDs for origin and destination to filter elevator alerts
+                origin_stop_ids = set(result.origin.gtfs_stop_ids.values())
+                dest_stop_ids = set(result.destination.gtfs_stop_ids.values())
+                # Strip N/S suffixes for matching
+                relevant_stop_ids = {s.rstrip("NS") for s in origin_stop_ids | dest_stop_ids}
+
+                filtered_alerts = []
+                for a in alerts:
+                    # Check if this is an elevator/escalator outage
+                    header_lower = a.header_text.lower()
+                    is_elevator_alert = "elevator" in header_lower or "escalator" in header_lower
+
+                    if is_elevator_alert:
+                        # Only include if it affects origin or destination station
+                        alert_stop_ids = {s.rstrip("NS") for s in a.affected_stops}
+                        if alert_stop_ids & relevant_stop_ids:
+                            filtered_alerts.append(a)
+                    else:
+                        # Non-elevator alerts are always included
+                        filtered_alerts.append(a)
+
+                if filtered_alerts:
+                    service_alerts = [
+                        {"lines": a.affected_lines, "header": a.header_text, "effect": a.effect}
+                        for a in filtered_alerts[:3]
+                    ]
         except Exception:
             pass
+
+        # Build a clear comparison of options
+        options_summary = []
+        for opt in result.options:
+            if opt.type == "no-transfer":
+                options_summary.append({
+                    "option": "A",
+                    "label": f"No transfer - Stay on {opt.line} train",
+                    "arrive_destination": format_time(opt.estimated_arrival) if opt.estimated_arrival else "Unknown",
+                    "details": opt.details,
+                })
+            else:
+                options_summary.append({
+                    "option": "B",
+                    "label": f"Transfer at {opt.transfer_at.name}: {opt.line} → {opt.express_line}",
+                    "arrive_destination": format_time(opt.estimated_arrival) if opt.estimated_arrival else "Unknown",
+                    "time_saved_minutes": opt.time_saved,
+                    "details": opt.details,
+                })
 
         return {
             "success": True,
@@ -149,27 +209,7 @@ def get_route_recommendation(origin: str, destination: str) -> dict:
             "direct_lines": result.direct_lines,
             "direction": "uptown/northbound" if result.direction == "N" else "downtown/southbound",
             "recommendation": result.recommendation,
-            "options": [
-                {
-                    "type": opt.type,
-                    "description": opt.description,
-                    "line": opt.line,
-                    "express_line": opt.express_line,
-                    "transfer_at": opt.transfer_at.name if opt.transfer_at else None,
-                    "estimated_arrival": format_time(opt.estimated_arrival) if opt.estimated_arrival else None,
-                    "time_saved": opt.time_saved,
-                    "details": opt.details,
-                }
-                for opt in result.options
-            ],
-            "transfer_analysis": {
-                "has_recommended_transfer": result.transfer_analysis.recommendation is not None,
-                "transfer_station": result.transfer_analysis.recommendation.transfer_station.name if result.transfer_analysis and result.transfer_analysis.recommendation else None,
-                "local_line": result.transfer_analysis.local_line if result.transfer_analysis else None,
-                "express_line": result.transfer_analysis.recommendation.express_line if result.transfer_analysis and result.transfer_analysis.recommendation else None,
-                "wait_time": result.transfer_analysis.recommendation.wait_time_minutes if result.transfer_analysis and result.transfer_analysis.recommendation else None,
-                "time_saved": result.transfer_analysis.recommendation.time_savings_minutes if result.transfer_analysis and result.transfer_analysis.recommendation else None,
-            } if result.transfer_analysis else None,
+            "options": options_summary,
             "service_alerts": service_alerts,
         }
 

@@ -179,19 +179,33 @@ async def get_arrivals_multi_line(
     direction: Optional[Literal["N", "S"]] = None,
 ) -> list[TrainArrival]:
     """Get arrivals for multiple lines at a station."""
-    base_stop_id = station.gtfs_stop_ids["N"].rstrip("N")
-    parsed_arrivals = await get_arrivals_at_stop_multi_line(lines, base_stop_id, direction)
+    # At terminal stations, ignore direction filter - trains arrive with opposite direction
+    # from how they depart (e.g., at South Ferry, trains arrive as 'S' but depart as 'N')
+    query_direction = direction
+    is_terminal = _is_terminal_station(station, lines[0] if lines else None)
+    if is_terminal and direction:
+        logger.debug(f"[get_arrivals_multi_line] Terminal station {station.name} - ignoring direction filter")
+        query_direction = None
 
-    return [
-        TrainArrival(
+    base_stop_id = station.gtfs_stop_ids["N"].rstrip("N")
+    parsed_arrivals = await get_arrivals_at_stop_multi_line(lines, base_stop_id, query_direction)
+
+    arrivals = []
+    for pa in parsed_arrivals:
+        # At terminals, flip direction for display (arrival 'S' means departure 'N')
+        display_direction = pa.direction
+        if is_terminal:
+            display_direction = "N" if pa.direction == "S" else "S"
+
+        arrivals.append(TrainArrival(
             line=pa.route_id,
-            direction=pa.direction,
-            direction_label=get_direction_label(pa.direction, station, pa.route_id),
-            destination=_get_terminal_name(pa.route_id, pa.direction),
+            direction=display_direction,
+            direction_label=get_direction_label(display_direction, station, pa.route_id),
+            destination=_get_terminal_name(pa.route_id, display_direction),
             arrival_time=pa.arrival_time,
             minutes_away=get_minutes_away(pa.arrival_time),
             is_express=is_express_line(pa.route_id),
             trip_id=pa.trip_id,
-        )
-        for pa in parsed_arrivals
-    ]
+        ))
+
+    return arrivals

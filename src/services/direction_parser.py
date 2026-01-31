@@ -134,8 +134,8 @@ def infer_direction(
     except ValueError:
         return None
 
-    # For numbered lines (IRT), lower stop_id = more south
+    # For numbered lines (IRT), higher stop_id = more south
     if line.upper() in ["1", "2", "3", "4", "5", "6", "7"]:
-        return "S" if dest_id < origin_id else "N"
+        return "N" if dest_id < origin_id else "S"
 
     return None
