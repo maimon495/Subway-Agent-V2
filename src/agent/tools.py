@@ -53,6 +53,31 @@ def get_next_trains(
     if isinstance(limit, str):
         limit = int(limit)
 
+    # Check for ambiguous station names - if multiple matches exist, ask for clarification
+    matches = find_stations_by_name(station, limit=5)
+    if len(matches) > 1:
+        # Check if top match is significantly better than alternatives
+        # If names are very similar or query is short/generic, show alternatives
+        query_normalized = station.lower().strip()
+        top_match = matches[0]
+
+        # If query doesn't exactly match the top result, show alternatives
+        exact_match = (top_match.name.lower() == query_normalized or
+                      any(a.lower() == query_normalized for a in top_match.aliases))
+
+        if not exact_match:
+            # Return alternatives for clarification
+            alternatives = [
+                {"name": s.name, "lines": s.lines, "borough": s.borough}
+                for s in matches[:4]
+            ]
+            return {
+                "success": True,
+                "needs_clarification": True,
+                "message": f'Multiple stations match "{station}". Please clarify which station:',
+                "alternatives": alternatives,
+            }
+
     # Parse slash-separated lines (e.g., "2/3" -> ["2", "3"])
     lines_to_query = None
     if line:
@@ -156,6 +181,32 @@ def get_next_trains(
         return {"success": False, "error": str(e)}
 
 
+def _check_ambiguous_station(station_query: str, label: str) -> Optional[dict]:
+    """Check if a station query is ambiguous and needs clarification."""
+    matches = find_stations_by_name(station_query, limit=5)
+    if len(matches) > 1:
+        query_normalized = station_query.lower().strip()
+        top_match = matches[0]
+
+        # If query doesn't exactly match the top result, show alternatives
+        exact_match = (top_match.name.lower() == query_normalized or
+                      any(a.lower() == query_normalized for a in top_match.aliases))
+
+        if not exact_match:
+            alternatives = [
+                {"name": s.name, "lines": s.lines, "borough": s.borough}
+                for s in matches[:4]
+            ]
+            return {
+                "success": True,
+                "needs_clarification": True,
+                "clarification_for": label,
+                "message": f'Multiple stations match "{station_query}". Please clarify which {label}:',
+                "alternatives": alternatives,
+            }
+    return None
+
+
 @tool
 def get_route_recommendation(origin: str, destination: str) -> dict:
     """Get route recommendations between two NYC subway stations.
@@ -170,6 +221,16 @@ def get_route_recommendation(origin: str, destination: str) -> dict:
     Returns:
         Dictionary with route options and recommendation
     """
+    # Check for ambiguous origin
+    origin_ambiguity = _check_ambiguous_station(origin, "origin station")
+    if origin_ambiguity:
+        return origin_ambiguity
+
+    # Check for ambiguous destination
+    dest_ambiguity = _check_ambiguous_station(destination, "destination station")
+    if dest_ambiguity:
+        return dest_ambiguity
+
     try:
         result = _run_async(get_route(origin, destination))
 
