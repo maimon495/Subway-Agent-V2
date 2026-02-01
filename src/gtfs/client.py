@@ -1,7 +1,7 @@
 """GTFS-RT client for fetching real-time subway data."""
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import httpx
@@ -88,7 +88,7 @@ def _parse_feed(feed) -> ParsedFeed:
             if not stu.HasField("arrival") or not stu.arrival.time:
                 continue
 
-            arrival_time = datetime.fromtimestamp(stu.arrival.time)
+            arrival_time = datetime.fromtimestamp(stu.arrival.time, tz=timezone.utc)
 
             # Skip arrivals in the past
             if arrival_time.timestamp() * 1000 < now - 60000:
@@ -96,7 +96,7 @@ def _parse_feed(feed) -> ParsedFeed:
 
             departure_time = None
             if stu.HasField("departure") and stu.departure.time:
-                departure_time = datetime.fromtimestamp(stu.departure.time)
+                departure_time = datetime.fromtimestamp(stu.departure.time, tz=timezone.utc)
 
             arrivals.append(ParsedArrival(
                 trip_id=trip_id,
@@ -109,7 +109,7 @@ def _parse_feed(feed) -> ParsedFeed:
                 is_assigned=False,
             ))
 
-    timestamp = datetime.fromtimestamp(feed.header.timestamp) if feed.header.timestamp else datetime.now()
+    timestamp = datetime.fromtimestamp(feed.header.timestamp, tz=timezone.utc) if feed.header.timestamp else datetime.now(timezone.utc)
 
     return ParsedFeed(timestamp=timestamp, arrivals=arrivals)
 

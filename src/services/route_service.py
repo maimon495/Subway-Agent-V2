@@ -128,9 +128,24 @@ async def get_route(origin_name: str, destination_name: str) -> RouteResult:
     if local_dest_arrival:
         no_transfer_arrival = local_dest_arrival
     elif next_local:
-        # Estimate: count stops and assume 2 min per stop
-        from .transfer_analyzer import _count_stops
-        stops_to_dest = _count_stops(origin, destination, no_transfer_line, direction)
+        # Estimate travel time using GTFS stop ID difference (works for IRT lines with numeric IDs)
+        # or fall back to a reasonable minimum
+        origin_stop_id = origin.gtfs_stop_ids.get(direction, origin.gtfs_stop_ids.get("N", ""))
+        dest_stop_id = destination.gtfs_stop_ids.get(direction, destination.gtfs_stop_ids.get("N", ""))
+
+        # Extract numeric portion of stop IDs
+        origin_num = ''.join(c for c in origin_stop_id if c.isdigit())
+        dest_num = ''.join(c for c in dest_stop_id if c.isdigit())
+
+        if origin_num and dest_num and origin_num.isdigit() and dest_num.isdigit():
+            # For IRT lines, stop IDs are sequential - difference gives approximate stop count
+            stops_to_dest = abs(int(origin_num) - int(dest_num))
+            # Ensure at least 5 stops as sanity check for any real trip
+            stops_to_dest = max(stops_to_dest, 5)
+        else:
+            # Fallback for lines with non-numeric stop IDs
+            stops_to_dest = 10  # Conservative estimate
+
         no_transfer_arrival = next_local.arrival_time + timedelta(minutes=stops_to_dest * 2)
     else:
         no_transfer_arrival = None
